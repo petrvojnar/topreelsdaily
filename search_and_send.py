@@ -122,9 +122,13 @@ def transcribe_with_gemini(video_id: str) -> str | None:
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
-        url   = f"https://www.youtube.com/watch?v={video_id}"
         response = model.generate_content([
-            {"video_url": url},
+            genai.protos.Part(
+                file_data=genai.protos.FileData(
+                    file_uri=f"https://www.youtube.com/watch?v={video_id}",
+                    mime_type="video/mp4",
+                )
+            ),
             ("Přepiš vše, co je v tomto videu řečeno. Výstup pouze v češtině — "
              "pokud je video v jiném jazyce, přelož ho. Bez komentářů, jen přepis."),
         ])
