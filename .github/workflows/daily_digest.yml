@@ -1,0 +1,45 @@
+name: Daily Video Digest
+
+on:
+  schedule:
+    # 6:00 UTC = 8:00 CEST (léto) / 7:00 CET (zima)
+    # Pro přesné 8:00 CET v zimě změňte na cron: '0 7 * * *'
+    - cron: "0 6 * * *"
+  workflow_dispatch:   # ruční spuštění tlačítkem na GitHubu
+
+permissions:
+  contents: write      # potřebujeme zapisovat seen_videos.json zpět do repozitáře
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run digest script
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          EMAIL_SENDER:    ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:  ${{ secrets.EMAIL_PASSWORD }}
+        run: python search_and_send.py
+
+      - name: Commit updated seen_videos.json
+        run: |
+          git config user.name  "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add seen_videos.json
+          git diff --staged --quiet || git commit -m "chore: update seen videos [skip ci]"
+          git push
