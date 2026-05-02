@@ -9,6 +9,7 @@ from email.mime.text import MIMEText
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 from deep_translator import GoogleTranslator
+import google.generativeai as genai
 
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
 EMAIL_SENDER    = os.environ["EMAIL_SENDER"]
@@ -111,6 +112,26 @@ def get_transcript_text(video_id: str) -> tuple[str | None, str | None]:
     except Exception:
         pass
     return None, None
+
+
+def transcribe_with_gemini(video_id: str) -> str | None:
+    """Transcribe a YouTube video using Gemini — fallback when captions unavailable."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        url   = f"https://www.youtube.com/watch?v={video_id}"
+        response = model.generate_content([
+            {"video_url": url},
+            ("Přepiš vše, co je v tomto videu řečeno. Výstup pouze v češtině — "
+             "pokud je video v jiném jazyce, přelož ho. Bez komentářů, jen přepis."),
+        ])
+        return response.text.strip()
+    except Exception as e:
+        print(f"  Gemini transcription error: {e}")
+        return None
 
 
 def to_czech(text: str) -> str:
@@ -238,7 +259,8 @@ def main() -> None:
         elif text:
             info["transcript_cs"] = text[:4000]
         else:
-            info["transcript_cs"] = None
+            print(f"  No captions — trying Gemini...")
+            info["transcript_cs"] = transcribe_with_gemini(vid_id)
         result_videos.append(info)
 
     # 5. mark as seen
