@@ -194,21 +194,66 @@ Vytvoř virální skript s přesnou strukturou:
 [12–15 hashtagů — mix českých a anglických]
 """
 
-def gemini_text(prompt: str) -> str | None:
-    """Call Gemini with a text-only prompt."""
+def gemini_configure() -> bool:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         print("  No GEMINI_API_KEY.")
+        return False
+    genai.configure(api_key=api_key)
+    return True
+
+def gemini_text(prompt: str) -> str | None:
+    """Call Gemini with a text-only prompt."""
+    if not gemini_configure():
         return None
     try:
-        genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
         resp = model.generate_content(prompt)
-        print(f"  Gemini OK ({len(resp.text)} chars)")
+        print(f"  Gemini text OK ({len(resp.text)} chars)")
         return resp.text.strip()
     except Exception as e:
-        print(f"  Gemini error: {e}")
+        print(f"  Gemini text error: {e}")
         return None
+
+def transcribe_audio_gemini(video_id: str) -> str | None:
+    """Download audio via yt-dlp, upload to Gemini File API, transcribe."""
+    if not gemini_configure():
+        return None
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_template = os.path.join(tmpdir, "audio.%(ext)s")
+        print(f"  Downloading audio...")
+        proc = subprocess.run(
+            ["yt-dlp", "-f", "bestaudio", "--no-playlist",
+             "-o", audio_template, "--quiet", url],
+            capture_output=True, text=True, timeout=120,
+        )
+        files = glob.glob(os.path.join(tmpdir, "audio.*"))
+        if not files:
+            print(f"  Audio download failed: {proc.stderr[:200]}")
+            return None
+        audio_path = files[0]
+        size_kb = os.path.getsize(audio_path) // 1024
+        print(f"  Audio downloaded: {size_kb} KB ({os.path.basename(audio_path)})")
+        try:
+            print(f"  Uploading to Gemini File API...")
+            audio_file = genai.upload_file(audio_path)
+            # Wait until ready
+            while audio_file.state.name == "PROCESSING":
+                time.sleep(2)
+                audio_file = genai.get_file(audio_file.name)
+            if audio_file.state.name != "ACTIVE":
+                print(f"  Gemini file not active: {audio_file.state.name}")
+                return None
+            print(f"  File active, calling Gemini...")
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            resp = model.generate_content([audio_file, REEL_PROMPT])
+            genai.delete_file(audio_file.name)
+            print(f"  Gemini audio OK ({len(resp.text)} chars)")
+            return resp.text.strip()
+        except Exception as e:
+            print(f"  Gemini File API error: {e}")
+            return None
 
 def analyze_from_transcript(raw_text: str, lang: str) -> str:
     """Translate + clean + create Reels script from existing transcript."""
@@ -253,13 +298,19 @@ def analyze_from_metadata(title: str, description: str) -> str:
 
 def process_video(video_id: str, title: str, description: str) -> str:
     """Return full 3-part analysis."""
+    # 1. Try YouTube captions (free, instant)
     text, lang = get_transcript(video_id)
     if text:
-        print(f"  Transcript found ({len(text)} chars), calling Gemini...")
+        print(f"  Captions found ({len(text)} chars), calling Gemini...")
         return analyze_from_transcript(text, lang)
-    else:
-        print(f"  No transcript — using metadata fallback.")
-        return analyze_from_metadata(title, description)
+    # 2. Download audio + Gemini File API (same as AI Studio manually)
+    print(f"  No captions — trying audio transcription via Gemini File API...")
+    result = transcribe_audio_gemini(video_id)
+    if result:
+        return result
+    # 3. Last resort: generate from title + description
+    print(f"  Audio failed — using metadata fallback.")
+    return analyze_from_metadata(title, description)
 
 # ── email ─────────────────────────────────────────────────────────────────
 
