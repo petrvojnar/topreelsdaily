@@ -1,4 +1,4 @@
 google-api-python-client==2.131.0
 youtube-transcript-api==0.6.2
 deep-translator==1.11.4
-google-generativeai==0.7.2
+google-genai==1.5.0
