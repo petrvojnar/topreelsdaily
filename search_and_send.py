@@ -207,7 +207,7 @@ def gemini_text(prompt: str) -> str | None:
     if not gemini_configure():
         return None
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-pro")
         resp = model.generate_content(prompt)
         print(f"  Gemini text OK ({len(resp.text)} chars)")
         return resp.text.strip()
@@ -246,7 +246,7 @@ def transcribe_audio_gemini(video_id: str) -> str | None:
                 print(f"  Gemini file not active: {audio_file.state.name}")
                 return None
             print(f"  File active, calling Gemini...")
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-pro")
             resp = model.generate_content([audio_file, REEL_PROMPT])
             genai.delete_file(audio_file.name)
             print(f"  Gemini audio OK ({len(resp.text)} chars)")
