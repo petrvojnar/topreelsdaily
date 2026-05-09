@@ -2,13 +2,12 @@ name: Daily Video Digest
 
 on:
   schedule:
-    # 6:00 UTC = 8:00 CEST (léto) / 7:00 CET (zima)
-    # Pro přesné 8:00 CET v zimě změňte na cron: '0 7 * * *'
-    - cron: "0 6 * * *"
+    # Pondělí a čtvrtek v 6:00 UTC = 8:00 CEST (léto) / 7:00 CET (zima)
+    - cron: "0 6 * * 1,4"
   workflow_dispatch:   # ruční spuštění tlačítkem na GitHubu
 
 permissions:
-  contents: write      # potřebujeme zapisovat seen_videos.json zpět do repozitáře
+  contents: write
 
 jobs:
   send-digest:
