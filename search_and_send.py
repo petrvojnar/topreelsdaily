@@ -13,7 +13,7 @@ from email.mime.text import MIMEText
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 from deep_translator import GoogleTranslator
-from google import genai
+import google.generativeai as genai
 
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
 EMAIL_SENDER    = os.environ["EMAIL_SENDER"]
@@ -201,11 +201,10 @@ def gemini_text(prompt: str) -> str | None:
         print("  No GEMINI_API_KEY.")
         return None
     try:
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt,
-        )
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        resp = model.generate_content(prompt)
+        print(f"  Gemini OK ({len(resp.text)} chars)")
         return resp.text.strip()
     except Exception as e:
         print(f"  Gemini error: {e}")
