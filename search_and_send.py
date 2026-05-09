@@ -1,19 +1,12 @@
 import os
 import json
-import re
-import glob
 import datetime
 import smtplib
-import subprocess
-import tempfile
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from googleapiclient.discovery import build
-from youtube_transcript_api import YouTubeTranscriptApi
-from deep_translator import GoogleTranslator
-import google.generativeai as genai
 
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
 EMAIL_SENDER    = os.environ["EMAIL_SENDER"]
@@ -34,8 +27,6 @@ QUERIES = [
     "jak zaujmout publikum shorts",
 ]
 
-# ── helpers ───────────────────────────────────────────────────────────────
-
 def load_seen() -> set:
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, encoding="utf-8") as f:
@@ -45,8 +36,6 @@ def load_seen() -> set:
 def save_seen(seen: set) -> None:
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
-
-# ── YouTube search & stats ────────────────────────────────────────────────
 
 def search_videos(youtube, query: str, max_results: int = 50) -> list[str]:
     try:
@@ -80,258 +69,17 @@ def get_stats(youtube, video_ids: list[str]) -> dict:
                 likes   = int(stats.get("likeCount", 0))
                 engagement = (likes / views * 100) if views > 0 else 0
                 result[vid_id] = {
-                    "title":       snippet["title"],
-                    "channel":     snippet["channelTitle"],
-                    "published":   snippet["publishedAt"][:10],
-                    "description": snippet.get("description", "")[:400],
-                    "views":       views,
-                    "likes":       likes,
-                    "engagement":  engagement,
-                    "url":         f"https://www.youtube.com/watch?v={vid_id}",
-                    "shorts_url":  f"https://www.youtube.com/shorts/{vid_id}",
+                    "title":      snippet["title"],
+                    "channel":    snippet["channelTitle"],
+                    "published":  snippet["publishedAt"][:10],
+                    "views":      views,
+                    "likes":      likes,
+                    "engagement": engagement,
+                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
                 }
         except Exception as e:
             print(f"  Stats error: {e}")
     return result
-
-# ── transcript extraction ─────────────────────────────────────────────────
-
-def parse_vtt(content: str) -> str:
-    """Extract clean text from WebVTT subtitle file."""
-    texts: list[str] = []
-    for line in content.split("\n"):
-        line = line.strip()
-        if (not line or "WEBVTT" in line or "-->" in line
-                or re.match(r"^\d+$", line) or line.startswith("NOTE")):
-            continue
-        clean = re.sub(r"<[^>]+>", "", line).strip()
-        if clean and (not texts or clean != texts[-1]):
-            texts.append(clean)
-    return " ".join(texts)
-
-def get_captions_api(video_id: str) -> tuple[str | None, str | None]:
-    """Try youtube-transcript-api."""
-    try:
-        tlist = YouTubeTranscriptApi.list_transcripts(video_id)
-        # prefer manual → then generated, prefer cs/en/sk
-        for prefer_generated in (False, True):
-            for t in tlist:
-                if t.is_generated != prefer_generated:
-                    continue
-                try:
-                    items = t.fetch()
-                    text = " ".join(i["text"] for i in items)
-                    print(f"  [API] captions OK — lang={t.language_code} generated={t.is_generated}")
-                    return text, t.language_code
-                except Exception:
-                    continue
-    except Exception as e:
-        print(f"  [API] captions failed: {e}")
-    return None, None
-
-def get_captions_ytdlp(video_id: str) -> tuple[str | None, str | None]:
-    """Try yt-dlp subtitle download (no video)."""
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            subprocess.run(
-                [
-                    "yt-dlp",
-                    "--skip-download",
-                    "--write-auto-sub",
-                    "--write-sub",
-                    "--sub-lang", "cs,en,sk",
-                    "--sub-format", "vtt",
-                    "--output", os.path.join(tmpdir, "%(id)s"),
-                    "--quiet",
-                    url,
-                ],
-                capture_output=True, text=True, timeout=60,
-            )
-            vtt_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
-            if not vtt_files:
-                print(f"  [yt-dlp] no subtitle files found")
-                return None, None
-            vtt_path = vtt_files[0]
-            lang = "cs" if ".cs." in vtt_path else "en"
-            with open(vtt_path, encoding="utf-8") as f:
-                text = parse_vtt(f.read())
-            if text:
-                print(f"  [yt-dlp] captions OK — lang={lang}, {len(text)} chars")
-                return text, lang
-        except Exception as e:
-            print(f"  [yt-dlp] error: {e}")
-    return None, None
-
-def get_transcript(video_id: str) -> tuple[str | None, str | None]:
-    """Try all transcript sources in order."""
-    text, lang = get_captions_api(video_id)
-    if text:
-        return text, lang
-    return get_captions_ytdlp(video_id)
-
-# ── Gemini analysis ───────────────────────────────────────────────────────
-
-REELS_STRUCTURE = """
-### 2. UPRAVENÝ TEXT
-Přepiš do čtivé, smysluplné češtiny bez přeřeknutí a opakování. Maximálně 200 slov.
-
----
-
-### 3. INSTAGRAM REELS SKRIPT
-Vytvoř virální skript s přesnou strukturou:
-
-🔥 HOOK (1–3 sekundy):
-[Jedna silná věta která okamžitě zastaví scrollování — překvapení, provokace nebo otázka]
-
-💡 OBSAH:
-[3–5 krátkých úderných bodů z videa — každý max 1–2 věty]
-
-📲 VÝZVA K AKCI:
-[Jedna věta — Sleduj / Ulož / Pošli příteli / Napiš do komentářů]
-
-#️⃣ HASHTAGY:
-[12–15 hashtagů — mix českých a anglických]
-"""
-
-def gemini_configure() -> bool:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("  No GEMINI_API_KEY.")
-        return False
-    genai.configure(api_key=api_key)
-    return True
-
-def gemini_text(prompt: str) -> str | None:
-    """Call Gemini with a text-only prompt."""
-    if not gemini_configure():
-        return None
-    try:
-        model = genai.GenerativeModel("gemini-pro")
-        resp = model.generate_content(prompt)
-        print(f"  Gemini text OK ({len(resp.text)} chars)")
-        return resp.text.strip()
-    except Exception as e:
-        print(f"  Gemini text error: {e}")
-        return None
-
-def transcribe_audio_gemini(video_id: str) -> str | None:
-    """Download audio via yt-dlp, upload to Gemini File API, transcribe."""
-    if not gemini_configure():
-        return None
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with tempfile.TemporaryDirectory() as tmpdir:
-        audio_template = os.path.join(tmpdir, "audio.%(ext)s")
-        print(f"  Downloading audio...")
-        proc = subprocess.run(
-            ["yt-dlp", "-f", "bestaudio", "--no-playlist",
-             "-o", audio_template, "--quiet", url],
-            capture_output=True, text=True, timeout=120,
-        )
-        files = glob.glob(os.path.join(tmpdir, "audio.*"))
-        if not files:
-            print(f"  Audio download failed: {proc.stderr[:200]}")
-            return None
-        audio_path = files[0]
-        size_kb = os.path.getsize(audio_path) // 1024
-        print(f"  Audio downloaded: {size_kb} KB ({os.path.basename(audio_path)})")
-        try:
-            print(f"  Uploading to Gemini File API...")
-            audio_file = genai.upload_file(audio_path)
-            # Wait until ready
-            while audio_file.state.name == "PROCESSING":
-                time.sleep(2)
-                audio_file = genai.get_file(audio_file.name)
-            if audio_file.state.name != "ACTIVE":
-                print(f"  Gemini file not active: {audio_file.state.name}")
-                return None
-            print(f"  File active, calling Gemini...")
-            model = genai.GenerativeModel("gemini-pro")
-            resp = model.generate_content([audio_file, REEL_PROMPT])
-            genai.delete_file(audio_file.name)
-            print(f"  Gemini audio OK ({len(resp.text)} chars)")
-            return resp.text.strip()
-        except Exception as e:
-            print(f"  Gemini File API error: {e}")
-            return None
-
-def analyze_from_transcript(raw_text: str, lang: str) -> str:
-    """Translate + clean + create Reels script from existing transcript."""
-    # Translate to Czech if needed
-    if lang != "cs":
-        try:
-            cs_text = GoogleTranslator(source="auto", target="cs").translate(raw_text[:4500])
-            print(f"  Translated from {lang} to cs.")
-        except Exception as e:
-            print(f"  Translation error: {e}")
-            cs_text = raw_text[:4500]
-    else:
-        cs_text = raw_text[:4500]
-
-    prompt = (
-        f"Zde je přepis videa o komunikaci/prezentaci (v češtině):\n\n"
-        f"{cs_text[:3500]}\n\n"
-        f"Nejprve uveď přepis pod nadpisem '### 1. PŘEPIS DO ČEŠTINY' "
-        f"(zkráceně, max 300 slov), pak pokračuj:\n"
-        f"{REELS_STRUCTURE}\n\n"
-        f"Piš výhradně v češtině. Buď konkrétní a přímý."
-    )
-    result = gemini_text(prompt)
-    return result or cs_text[:2000]
-
-def analyze_from_metadata(title: str, description: str) -> str:
-    """Create Reels script from title + description only (guaranteed fallback)."""
-    print("  Using metadata fallback (title + description).")
-    prompt = (
-        f"Název videa: {title}\n"
-        f"Popis: {description[:400]}\n\n"
-        f"Toto video je o komunikaci nebo prezentačních dovednostech. "
-        f"Na základě názvu a popisu vytvoř:\n\n"
-        f"### 1. PŘEPIS DO ČEŠTINY\n"
-        f"Odhadni co video pravděpodobně obsahuje a napiš klíčové myšlenky (100–150 slov).\n\n"
-        f"{REELS_STRUCTURE}\n\n"
-        f"Piš výhradně v češtině. Buď konkrétní a přímý. "
-        f"Poznámka: přepis je odhadnutý z názvu — skutečný přepis nebyl dostupný."
-    )
-    result = gemini_text(prompt)
-    return result or f"⚠️ Přepis není k dispozici. Téma: {title}"
-
-def process_video(video_id: str, title: str, description: str) -> str:
-    """Return full 3-part analysis."""
-    # 1. Try YouTube captions (free, instant)
-    text, lang = get_transcript(video_id)
-    if text:
-        print(f"  Captions found ({len(text)} chars), calling Gemini...")
-        return analyze_from_transcript(text, lang)
-    # 2. Download audio + Gemini File API (same as AI Studio manually)
-    print(f"  No captions — trying audio transcription via Gemini File API...")
-    result = transcribe_audio_gemini(video_id)
-    if result:
-        return result
-    # 3. Last resort: generate from title + description
-    print(f"  Audio failed — using metadata fallback.")
-    return analyze_from_metadata(title, description)
-
-# ── email ─────────────────────────────────────────────────────────────────
-
-def format_analysis_html(raw: str) -> str:
-    """Convert markdown sections to HTML."""
-    lines = raw.split("\n")
-    html = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            html.append("<br>")
-        elif line.startswith("### ") or line.startswith("## "):
-            html.append(f'<p style="font-weight:bold;color:#1d3557;margin:16px 0 4px;font-size:14px">'
-                        f'{line.lstrip("# ").strip()}</p>')
-        elif line == "---":
-            html.append('<hr style="border:none;border-top:1px solid #dee2e6;margin:12px 0">')
-        elif line[:2] in ("🔥", "💡", "📲", "#️"):
-            html.append(f'<p style="font-weight:bold;margin:10px 0 2px;font-size:13px">{line}</p>')
-        else:
-            html.append(f'<p style="margin:3px 0;line-height:1.75;font-size:13px">{line}</p>')
-    return "\n".join(html)
 
 def build_html(videos: list[dict]) -> str:
     weekday_cs = {0:"pondělí",1:"úterý",2:"středa",3:"čtvrtek",4:"pátek",5:"sobota",6:"neděle"}
@@ -340,39 +88,41 @@ def build_html(videos: list[dict]) -> str:
 
     rows = ""
     for i, v in enumerate(videos, 1):
-        analysis_block = format_analysis_html(v.get("analysis", ""))
         rows += f"""
-        <div style="border:1px solid #dee2e6;border-radius:10px;padding:18px;margin-bottom:28px">
+        <div style="border:1px solid #dee2e6;border-radius:10px;padding:18px;margin-bottom:20px">
           <table width="100%"><tr>
-            <td style="width:36px;vertical-align:top;padding-top:2px">
+            <td style="width:36px;vertical-align:top;padding-top:4px">
               <span style="font-size:26px;font-weight:bold;color:#e63946">{i}</span>
             </td>
             <td>
-              <a href="{v['shorts_url']}" style="font-size:16px;font-weight:bold;
+              <a href="{v['url']}" style="font-size:16px;font-weight:bold;
                 color:#1d3557;text-decoration:none">{v['title']}</a>
-              <div style="color:#6c757d;font-size:12px;margin-top:4px">
+              <div style="color:#6c757d;font-size:12px;margin-top:5px">
                 📺 {v['channel']} &nbsp;·&nbsp; 📅 {v['published']}
               </div>
-              <div style="background:#f1faee;padding:7px 12px;border-radius:6px;
+              <div style="background:#f1faee;padding:8px 12px;border-radius:6px;
                           font-size:12px;margin-top:8px">
                 👁 {v['views']:,} zhlédnutí &nbsp;|&nbsp;
                 👍 {v['likes']:,} líbí se &nbsp;|&nbsp;
                 📊 {v['engagement']:.1f} % engagement
               </div>
-              <div style="margin-top:14px;background:#f8f9fa;border-radius:8px;padding:16px">
-                {analysis_block}
+              <div style="margin-top:8px">
+                <a href="{v['url']}" style="background:#e63946;color:white;padding:6px 14px;
+                  border-radius:6px;text-decoration:none;font-size:13px;font-weight:bold">
+                  ▶ Přehrát Short
+                </a>
               </div>
             </td>
           </tr></table>
         </div>"""
 
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body
-      style="font-family:Arial,sans-serif;max-width:720px;margin:0 auto;padding:20px;color:#212529">
+      style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;padding:20px;color:#212529">
       <h1 style="color:#e63946;margin-bottom:4px">🎯 Top 5 Shorts – Komunikace & Prezentace</h1>
-      <p style="color:#6c757d;margin-top:0;font-size:14px">{date_str} · přepis + Instagram Reels skript</p>
+      <p style="color:#6c757d;margin-top:0;font-size:14px">{date_str}</p>
       {rows}
       <p style="color:#adb5bd;font-size:11px;margin-top:30px;border-top:1px solid #dee2e6;padding-top:10px">
-        Automaticky generováno · YouTube Shorts · Gemini 1.5 Flash
+        Automaticky generováno · YouTube Shorts · Řazeno podle engagement (likes/views)
       </p>
     </body></html>"""
 
@@ -389,8 +139,6 @@ def send_email(html: str) -> None:
         s.login(EMAIL_SENDER, EMAIL_PASSWORD)
         s.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
     print("Email sent.")
-
-# ── main ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
@@ -422,14 +170,11 @@ def main() -> None:
     )
     top5 = ranked[:5]
 
-    result_videos: list[dict] = []
     for vid_id, info in top5:
-        print(f"\n=== {info['title'][:65]} ===")
-        info["analysis"] = process_video(vid_id, info["title"], info["description"])
-        result_videos.append(info)
+        print(f"  Selected: {info['title'][:60]} ({info['views']:,} views, {info['engagement']:.1f}%)")
 
     save_seen(seen | {vid_id for vid_id, _ in top5})
-    html = build_html(result_videos)
+    html = build_html([info for _, info in top5])
     send_email(html)
 
 if __name__ == "__main__":
